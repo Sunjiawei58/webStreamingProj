@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>Game Stream</title>
+  <script src="/nipplejs.js"></script>
+  <!-- mediasoup-client: bundled locally (npx esbuild, global=mediasoupClient) -->
+  <script src="/mediasoup-client.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0a0a;
+      color: #eee;
+      font-family: monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100dvh;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    #overlay {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.85);
+      z-index: 10;
+      gap: 16px;
+    }
+
+    #overlay h1 { font-size: 1.4rem; letter-spacing: 2px; }
+    #overlay p  { font-size: 0.85rem; color: #888; }
+
+    #start-btn {
+      padding: 12px 36px;
+      font-size: 1rem;
+      font-family: monospace;
+      background: #1a6ed8;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      letter-spacing: 1px;
+    }
+    #start-btn:hover { background: #1a5fc0; }
+    #start-btn:disabled { background: #444; cursor: not-allowed; }
+
+    #status {
+      position: fixed; top: 8px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.7);
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      color: #aaa;
+      z-index: 20;
+      pointer-events: none;
+    }
+
+    #hint {
+      position: fixed; bottom: 8px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.6);
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      color: #666;
+      z-index: 20;
+      pointer-events: none;
+    }
+
+    #stats {
+      position: fixed; top: 8px; right: 12px;
+      background: rgba(0,0,0,0.65);
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      color: #0f0;
+      z-index: 20;
+      pointer-events: none;
+      line-height: 1.6;
+      display: none;
+    }
+
+    video {
+      max-width: 100%;
+      max-height: 100dvh;
+      display: block;
+      cursor: none;
+      outline: none;
+    }
+
+    /* ── Mobile virtual controller ───────────────────────────────────────── */
+    #mobile-controls {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 15;
+      pointer-events: auto;
+    }
+
+    #joystick-zone {
+      position: absolute;
+      left: 12px;
+      bottom: 140px;
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      pointer-events: all;
+    }
+
+    #camera-zone {
+      position: absolute;
+      right: 0;
+      top: 0;
+      /* right 60% of screen, above ability bar */
+      width: 60%;
+      bottom: 132px;
+      pointer-events: all;
+    }
+
+    #ability-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 128px;
+      background: rgba(0,0,0,0.65);
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      pointer-events: all;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 6px;
+      justify-content: center;
+    }
+
+    .abtn {
+      flex: 1;
+      max-width: 58px;
+      height: 50px;
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 8px;
+      color: #ddd;
+      font-family: monospace;
+      font-size: 0.78rem;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
+    .abtn:active, .abtn.pressed {
+      background: rgba(255,255,255,0.32);
+      color: #fff;
+    }
+
+    .abtn.wide { max-width: 80px; font-size: 0.72rem; }
+
+    #cam-hint {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: rgba(255,255,255,0.18);
+      font-size: 0.7rem;
+      pointer-events: none;
+      text-align: center;
+      line-height: 1.8;
+    }
+  </style>
+</head>
+<body>
+
+<div id="overlay">
+  <h1>GAME STREAM</h1>
+  <p id="connect-status">Ready to connect</p>
+  <button id="start-btn">Connect &amp; Play</button>
+  <p>Click the video to lock your mouse &nbsp;(Esc to release)</p>
+</div>
+
+<div id="status">Disconnected</div>
+<div id="hint">Click video → lock mouse &nbsp;|&nbsp; Esc → unlock &nbsp;|&nbsp; F11 → fullscreen</div>
+<div id="stats"></div>
+
+<video id="video" autoplay playsinline muted tabindex="0"></video>
+
+<!-- Mobile virtual controller — shown only on touch devices -->
+<div id="mobile-controls">
+  <div id="joystick-zone"></div>
+
+  <div id="camera-zone">
+    <div id="cam-hint">Drag → camera<br>Tap → click</div>
+  </div>
+
+  <div id="ability-bar">
+    <div class="btn-row">
+      <button class="abtn" data-key="1">1</button>
+      <button class="abtn" data-key="2">2</button>
+      <button class="abtn" data-key="3">3</button>
+      <button class="abtn" data-key="4">4</button>
+      <button class="abtn" data-key="5">5</button>
+      <button class="abtn" data-key="6">6</button>
+      <button class="abtn" data-key="7">7</button>
+      <button class="abtn" data-key="8">8</button>
+    </div>
+    <div class="btn-row">
+      <button class="abtn wide" data-key=" ">Jump</button>
+      <button class="abtn" data-key="Tab">Tab</button>
+      <button class="abtn" data-key="m">Map</button>
+      <button class="abtn" data-key="i">Bag</button>
+      <button class="abtn" data-key="b">Spells</button>
+      <button class="abtn" data-mouse="2">R🖱</button>
+      <button class="abtn" data-key="Escape">Esc</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const video       = document.getElementById('video');
+  const overlay     = document.getElementById('overlay');
+  const statsEl     = document.getElementById('stats');
+  const statusEl    = document.getElementById('status');
+  const connectStat = document.getElementById('connect-status');
+  const startBtn    = document.getElementById('start-btn');
+  video.muted = true;
+
+  // ── Video element diagnostic events ───────────────────────────────────────
+  video.addEventListener('loadedmetadata', () => dbg('video: loadedmetadata'));
+  video.addEventListener('canplay',        () => dbg('video: canplay'));
+  video.addEventListener('playing',        () => dbg('video: playing ✓'));
+  video.addEventListener('error',          () => dbg('video: error ' + (video.error?.message ?? '?')));
+
+  // When the browser runs out of data, ask the server for a fresh keyframe so
+  // the decoder can resync immediately instead of waiting up to 0.33s for the
+  // next scheduled IDR.
+  let _keyframeThrottle = 0;
+  function requestKeyframeFromServer() {
+    const now = Date.now();
+    if (now - _keyframeThrottle < 500) return;   // at most once per 500ms
+    _keyframeThrottle = now;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'requestKeyframe' }));
+      dbg('→ requestKeyframe sent');
+    }
+  }
+  video.addEventListener('stalled', () => { dbg('video: stalled'); requestKeyframeFromServer(); });
+  video.addEventListener('waiting', () => { dbg('video: waiting'); requestKeyframeFromServer(); });
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  let ws, recvTransport, msVideoConsumer, statsTimer;
+  let connected     = false;
+  let pointerLocked = false;
+
+  // ── Screen Wake Lock — prevents mobile browser from throttling timers ──────
+  // Without this, Chrome/Safari on mobile coalesce JS timers to ~1Hz when the
+  // screen dims, causing the WebRTC jitter buffer to balloon to 400ms+.
+  let wakeLock = null;
+  async function acquireWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch {}
+  }
+  // Re-acquire after tab becomes visible again (lock is auto-released on hide)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && connected) {
+      acquireWakeLock();
+      // Re-sync playback speed in case it was left at fast-drain rate
+      video.playbackRate = 1.0;
+    }
+  });
+
+  // ── Decode time via requestVideoFrameCallback ──────────────────────────────
+  let decodeMs = '—';
+  let decodeSum = 0, decodeCount = 0;
+
+  function scheduleRVFC() {
+    if (!video.requestVideoFrameCallback) return;
+    video.requestVideoFrameCallback((now, meta) => {
+      if (meta.processingDuration != null) {
+        decodeSum += meta.processingDuration * 1000;
+        decodeCount++;
+      }
+      // Re-pin jitter buffer target every frame (~16ms) instead of every 250ms.
+      // libwebrtc's adaptive algorithm adjusts the target on every frame using
+      // measured RTP interarrival jitter — if we only fight it at 250ms intervals
+      // it silently drifts back toward 100-200ms between polls.
+      // Pinning here is the tightest possible loop short of patching libwebrtc.
+      if (videoReceiver) {
+        if (videoReceiver.jitterBufferTarget    !== undefined) videoReceiver.jitterBufferTarget    = 0;
+        if (videoReceiver.playoutDelayHint      !== undefined) videoReceiver.playoutDelayHint      = 0;
+        if (videoReceiver.jitterBufferDelayHint !== undefined) videoReceiver.jitterBufferDelayHint = 0;
+      }
+      scheduleRVFC();
+    });
+  }
+
+  // ── Stats polling + live-edge enforcement ─────────────────────────────────
+  let prevBytes = 0, prevTs = 0, prevJbDelay = 0, prevJbCount = 0;
+  let prevFramesDecoded = 0, prevTotalDecodeTime = 0;
+  let jitterMs = '—';
+  let decoderImpl = '—'; // e.g. "ExternalDecoder", "FFmpegVideoDecoder", "D3D11VideoDecoder"
+  let codecLabel = '—', frameSize = '—', framesLabel = '—', keyframesLabel = '—', decodeAvgMs = '—';
+  let videoFramesLabel = '—', videoFpsLabel = '—', prevVideoFrames = 0, prevVideoFramesAt = 0;
+  let videoReceiver = null; // cached to re-pin jitterBufferTarget every poll
+
+  // ── E2E latency probe via DataChannel ─────────────────────────────────────
+  // Sends a probe every 2s; server echoes immediately (no robotjs delay).
+  // probeRtt = DataChannel round-trip time (same physical path as input msgs).
+  //
+  // E2E input-to-display estimate:
+  //   probeRtt/2   → input travels to server (one-way)
+  //   + 1000/FPS/2 → average wait for ddagrab's next vsync-aligned frame (~8ms)
+  //   + JBuf       → time frame sits in WebRTC jitter buffer
+  //   + Decode     → decoder processing time (from requestVideoFrameCallback)
+  //
+  // Note: game reaction time (input → scene change) is NOT included —
+  // that's application-dependent and unmeasurable from the streaming layer.
+  let probeRtt = '—';
+  let e2eMs    = '—';
+  let probeTimer;
+
+  function startProbe() {
+    probeTimer = setInterval(() => {
+      if (ws?.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: 'probe', t: performance.now() }));
+    }, 2000);
+  }
+
+  function stopProbe() { clearInterval(probeTimer); }
+
+  // Tiered drain strategy:
+  //   Stateless — rate is derived from current lagMs every poll, no conditions
+  //   on previous state. This avoids the "stuck in 1.1x" bug where the old
+  //   dual-branch logic would stop updating once draining had started.
+  //
+  //   Hard jump: when lag > JUMP_MS, skip currentTime forward immediately.
+  //   This is the only reliable way to drain a deeply-grown jitter buffer fast;
+  //   playbackRate alone at 1.5x would take ~4s to drain 600ms of backlog.
+  //   On mobile Safari currentTime+= is sometimes a no-op — playbackRate covers
+  //   that case as a complement, not a replacement.
+  //
+  //   playbackRate tiers (complement to the jump, handles gradual drift):
+  //     lag > 150ms → 1.5x  (drains 50ms backlog per 100ms real time)
+  //     lag >  30ms → 1.1x  (drains 10ms backlog per 100ms real time)
+  //     lag <=  8ms → 1.0x  (back to normal)
+  const JUMP_MS       = 60;   // hard-jump: anything above one frame worth of lag
+  const JUMP_TARGET   = 8;    // land at ~half a frame — tight but avoids under-run
+  const RATE_HIGH_MS  = 40;   // above → 1.5x
+  const RATE_LOW_MS   = 16;   // above → 1.1x  (one frame boundary)
+  const RATE_IDLE_MS  = 8;    // below → 1.0x
+  let lastJumpAt      = 0;
+  const JUMP_COOLDOWN = 500;  // allow a jump up to 2x/second
+
+  async function pollStats() {
+    if (!msVideoConsumer && !recvTransport) return;
+    let allReports = new Map();
+    if (msVideoConsumer) {
+      const r = await msVideoConsumer.getStats();
+      r.forEach((v, k) => allReports.set(k, v));
+    }
+    if (recvTransport) {
+      const r = await recvTransport.getStats();
+      r.forEach((v, k) => allReports.set(k, v));
+    }
+    const reports = allReports;
+    let fps = '—', rttMs = '—', kbps = '—';
+
+    reports.forEach((r) => {
+      if (r.type === 'inbound-rtp' && r.kind === 'video') {
+        frameSize = (r.frameWidth && r.frameHeight) ? `${r.frameWidth}x${r.frameHeight}` : frameSize;
+        framesLabel = r.framesDecoded != null
+          ? `${r.framesDecoded}${r.framesReceived != null ? '/' + r.framesReceived : ''}`
+          : framesLabel;
+        keyframesLabel = r.keyFramesDecoded != null ? String(r.keyFramesDecoded) : keyframesLabel;
+
+        const codec = r.codecId ? reports.get(r.codecId) : null;
+        if (codec) {
+          codecLabel = codec.mimeType ?? codecLabel;
+          if (codec.sdpFmtpLine) codecLabel += ` ${codec.sdpFmtpLine}`;
+        }
+
+        if (r.framesDecoded != null && r.totalDecodeTime != null) {
+          const dFrames = r.framesDecoded - prevFramesDecoded;
+          const dDecode = r.totalDecodeTime - prevTotalDecodeTime;
+          if (dFrames > 0 && dDecode >= 0) decodeAvgMs = ((dDecode / dFrames) * 1000).toFixed(2);
+          prevFramesDecoded = r.framesDecoded;
+          prevTotalDecodeTime = r.totalDecodeTime;
+        }
+        fps = r.framesPerSecond?.toFixed(0) ?? '—';
+        // decoder_implementation_name tells us HW vs SW:
+        //   ExternalDecoder / D3D11VideoDecoder / VDAVideoDecoder  → HW
+        //   FFmpegVideoDecoder / libvpx / dav1d                    → SW
+        if (r.decoderImplementation) decoderImpl = r.decoderImplementation;
+        const now = r.timestamp;
+        const dt  = (now - prevTs) / 1000;
+        const db  = r.bytesReceived - prevBytes;
+        if (dt > 0 && prevTs > 0) kbps = ((db * 8) / dt / 1000).toFixed(0);
+        prevBytes = r.bytesReceived;
+        prevTs    = now;
+
+        // (jitterBufferTarget re-pinned every frame in scheduleRVFC — no need here)
+
+        // Average ms each frame spent in jitter buffer this interval
+        const dJb  = (r.jitterBufferDelay       ?? 0) - prevJbDelay;
+        const dCnt = (r.jitterBufferEmittedCount ?? 0) - prevJbCount;
+        if (dCnt > 0) {
+          const lagMs = (dJb / dCnt) * 1000;
+          jitterMs = lagMs.toFixed(0);
+
+          if (!video.paused) {
+            const nowPerf = performance.now();
+
+            // ── Hard jump: instantly skip past the backlog ──────────────────
+            // Needed when lag > JUMP_MS because playbackRate alone is too slow:
+            // 1.5x drains 50ms per 100ms real time → 600ms takes 12s to drain.
+            if (lagMs > JUMP_MS && nowPerf - lastJumpAt > JUMP_COOLDOWN) {
+              const skipSec = (lagMs - JUMP_TARGET) / 1000;
+              video.currentTime += skipSec;
+              lastJumpAt = nowPerf;
+              console.log(`[sync] jump +${(skipSec*1000).toFixed(0)}ms (lag=${lagMs.toFixed(0)}ms)`);
+            }
+
+            // ── Tiered playbackRate: stateless, derived from current lag ────
+            // Handles gradual drift and mobile Safari where currentTime+= no-ops.
+            const targetRate = lagMs > RATE_HIGH_MS ? 1.5
+                             : lagMs > RATE_LOW_MS  ? 1.1
+                             : lagMs <= RATE_IDLE_MS ? 1.0
+                             : video.playbackRate; // hysteresis: keep current rate
+            if (video.playbackRate !== targetRate) {
+              video.playbackRate = targetRate;
+              console.log(`[sync] rate=${targetRate} (lag=${lagMs.toFixed(0)}ms)`);
+            }
+          }
+        }
+        prevJbDelay = r.jitterBufferDelay       ?? prevJbDelay;
+        prevJbCount = r.jitterBufferEmittedCount ?? prevJbCount;
+      }
+      if (r.type === 'candidate-pair' && r.state === 'succeeded') {
+        rttMs = r.currentRoundTripTime != null
+          ? (r.currentRoundTripTime * 1000).toFixed(0) : '—';
+      }
+    });
+
+    if (decodeCount > 0) {
+      decodeMs = (decodeSum / decodeCount).toFixed(2);
+      decodeSum = 0; decodeCount = 0;
+    }
+
+    const quality = typeof video.getVideoPlaybackQuality === 'function'
+      ? video.getVideoPlaybackQuality()
+      : null;
+    const totalVideoFrames = quality?.totalVideoFrames ?? video.webkitDecodedFrameCount;
+    const droppedVideoFrames = quality?.droppedVideoFrames ?? video.webkitDroppedFrameCount;
+    if (totalVideoFrames != null) {
+      videoFramesLabel = `${totalVideoFrames}${droppedVideoFrames != null ? ' drop=' + droppedVideoFrames : ''}`;
+      const nowPerf = performance.now();
+      if (prevVideoFramesAt > 0) {
+        const dt = (nowPerf - prevVideoFramesAt) / 1000;
+        const df = totalVideoFrames - prevVideoFrames;
+        if (dt > 0 && df >= 0) videoFpsLabel = (df / dt).toFixed(0);
+      }
+      prevVideoFrames = totalVideoFrames;
+      prevVideoFramesAt = nowPerf;
+    }
+
+    // Recalculate E2E estimate with latest numbers
+    const jbNum  = parseFloat(jitterMs);
+    const decNum = parseFloat(decodeMs);
+    const rttNum = parseFloat(probeRtt);
+    if (!isNaN(jbNum) && !isNaN(decNum) && !isNaN(rttNum)) {
+      const avgFrameWait = (1000 / 60) / 2; // ~8ms average wait for next ddagrab frame
+      e2eMs = (rttNum / 2 + avgFrameWait + jbNum + decNum).toFixed(0);
+    }
+
+    // Colour-code decoder: green = HW, red = SW
+    const hwKeywords = ['ExternalDecoder','D3D11','VDA','VideoToolbox','MediaFoundation'];
+    const isHW = hwKeywords.some(k => decoderImpl.includes(k));
+    const decoderColour = decoderImpl === '—' ? '#aaa' : isHW ? '#0f0' : '#f66';
+    const decoderLabel  = decoderImpl === '—' ? '—'
+                        : isHW ? `HW:${decoderImpl}` : `SW:${decoderImpl}`;
+
+    statsEl.innerHTML =
+      `FPS &nbsp;&nbsp;&nbsp; ${fps}<br>` +
+      `RTT &nbsp;&nbsp;&nbsp; ${rttMs} ms<br>` +
+      `Probe &nbsp;&nbsp; ${probeRtt} ms<br>` +
+      `Kbps &nbsp;&nbsp; ${kbps}<br>` +
+      `Size &nbsp;&nbsp; ${frameSize}<br>` +
+      `Frames&nbsp; ${framesLabel}<br>` +
+      `VidFrm&nbsp; ${videoFramesLabel}<br>` +
+      `VidFPS&nbsp; ${videoFpsLabel}<br>` +
+      `KeyFrm&nbsp; ${keyframesLabel}<br>` +
+      `DecAvg&nbsp; ${decodeAvgMs} ms<br>` +
+      `RVFC &nbsp;&nbsp; ${decodeMs} ms<br>` +
+      `Codec &nbsp; ${codecLabel}<br>` +
+      `<span style="color:${decoderColour}">Impl &nbsp;&nbsp;&nbsp; ${decoderLabel}</span><br>` +
+      `JBuf &nbsp;&nbsp; ${jitterMs} ms<br>` +
+      `<span style="color:#ff9">E2E &nbsp;&nbsp;&nbsp; ${e2eMs} ms</span>`;
+  }
+
+  function startStats() {
+    statsEl.style.display = 'block';
+    prevBytes = 0; prevTs = 0;
+    scheduleRVFC();
+    // Poll at 250ms — 4× faster than before so we catch lag spikes early.
+    // At 1000ms poll interval, lag could reach 600ms before first detection.
+    statsTimer = setInterval(pollStats, 250);
+    startProbe();
+  }
+
+  function stopStats() {
+    clearInterval(statsTimer);
+    stopProbe();
+    statsEl.style.display = 'none';
+  }
+
+
+  // Updated dynamically from server 'config' message
+  let STREAM_W = 1920;
+  let STREAM_H = 1080;
+
+  // ── Key map ────────────────────────────────────────────────────────────────
+  const KEY_MAP = {
+    ' ': 'space', 'ArrowUp': 'up', 'ArrowDown': 'down',
+    'ArrowLeft': 'left', 'ArrowRight': 'right',
+    'Enter': 'enter', 'Escape': 'escape', 'Backspace': 'backspace',
+    'Tab': 'tab', 'Delete': 'delete', 'Home': 'home', 'End': 'end',
+    'PageUp': 'pageup', 'PageDown': 'pagedown',
+    'Control': 'control', 'Shift': 'shift', 'Alt': 'alt', 'Meta': 'command',
+    'CapsLock': 'caps_lock',
+    'F1':'f1','F2':'f2','F3':'f3','F4':'f4','F5':'f5','F6':'f6',
+    'F7':'f7','F8':'f8','F9':'f9','F10':'f10','F11':'f11','F12':'f12',
+  };
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function setStatus(msg) { statusEl.textContent = msg; }
+
+  // ── Debug overlay (disabled — re-enable by uncommenting) ──────────────────
+  // const debugEl = document.createElement('div');
+  // Object.assign(debugEl.style, { ... });
+  // document.body.appendChild(debugEl);
+  function dbg(msg) { console.log('[dbg]', msg); }
+
+  function sendInput(obj) {
+    if (ws?.readyState !== WebSocket.OPEN) {
+      dbg(`sendInput blocked: ws=${ws?.readyState} connected=${connected} type=${obj.type}`);
+      return;
+    }
+    ws.send(JSON.stringify(obj));
+    dbg(`sent: ${JSON.stringify(obj)}`);
+  }
+
+  function videoToServerCoords(clientX, clientY) {
+    const r = video.getBoundingClientRect();
+    return {
+      x: Math.round((clientX - r.left) / r.width  * STREAM_W),
+      y: Math.round((clientY - r.top)  / r.height * STREAM_H),
+    };
+  }
+
+  // ── WebRTC connection (mediasoup-client) ───────────────────────────────────
+  //
+  // Signaling flow (simplified — no 'connected' WS message):
+  //
+  //  Server → Client  transportParams   (ICE/DTLS params + routerRtpCapabilities)
+  //  Client → Server  rtpCapabilities   (what codecs the browser supports)
+  //  Server → Client  consume           (video + audio consumer params)
+  //  Client → Server  dtlsParameters    (triggered inside recvTransport.consume())
+  //  Server calls webRtcTransport.connect() → ICE+DTLS negotiates
+  //  RTCPeerConnection fires connectionstatechange:'connected'
+  //    → we resolve the pending 'connect' callback
+  //    → we set video.srcObject and call video.play()
+  //    → we send resumeConsumer so server triggers a keyframe
+  //
+  // No 'connected' WS message.  No promise gate.  No race condition.
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}`);
+
+    connectStat.textContent = 'Connecting…';
+    startBtn.disabled = true;
+
+    // Both of these must be true before we can start playback.
+    // Whichever completes last calls tryStart().
+    let iceConnected       = false;
+    let pendingMediaStream = null;
+
+    function tryStart() {
+      if (!iceConnected || !pendingMediaStream || connected) return;
+      connected = true;
+      video.srcObject = pendingMediaStream;
+      dbg(`srcObject set — tracks: ${pendingMediaStream.getTracks().map(t => t.kind + '/' + t.readyState).join(', ')}`);
+      video.play().catch(e => dbg('play() error: ' + e.message));
+      ws.send(JSON.stringify({ type: 'resumeConsumer' }));
+      acquireWakeLock();
+      overlay.style.display = 'none';
+      if (isTouchDevice) {
+        document.getElementById('mobile-controls').style.display = 'block';
+        window._initJoystick?.();
+      }
+      setStatus('Connected');
+      startStats();
+    }
+
+    ws.onmessage = async ({ data }) => {
+      let msg;
+      try { msg = JSON.parse(data); } catch { return; }
+      dbg(`ws ← ${msg.type}`);
+
+      // ── config ────────────────────────────────────────────────────────────
+      if (msg.type === 'config') {
+        STREAM_W = msg.width;
+        STREAM_H = msg.height;
+        dbg(`stream res: ${STREAM_W}×${STREAM_H}`);
+
+      // ── transportParams ───────────────────────────────────────────────────
+      // Step 1: load the mediasoup Device so it knows which codecs the router
+      // supports, then create a RecvTransport that mirrors the server transport.
+      } else if (msg.type === 'transportParams') {
+        connectStat.textContent = 'Loading WebRTC device…';
+        const device = new mediasoupClient.Device();
+        try {
+          await device.load({ routerRtpCapabilities: msg.routerRtpCapabilities });
+        } catch (err) {
+          connectStat.textContent = 'Device load failed: ' + err.message;
+          startBtn.disabled = false;
+          return;
+        }
+
+        recvTransport = device.createRecvTransport({
+          id:             msg.id,
+          iceParameters:  msg.iceParameters,
+          iceCandidates:  msg.iceCandidates,
+          dtlsParameters: msg.dtlsParameters,
+          // No STUN needed for LAN streaming; include anyway for safety
+          iceServers: [],
+        });
+
+        // 'connect' fires once — right before ICE/DTLS starts.
+        // Forward dtlsParameters to server, then call callback() IMMEDIATELY.
+        // Calling callback() is what tells mediasoup-client "we've done our part"
+        // and allows ICE to start.  Do NOT wait for connectionstatechange here —
+        // ICE cannot begin until callback() is called, so waiting for 'connected'
+        // before calling it is a deadlock.
+        recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
+          dbg('transport connect event — sending dtlsParameters');
+          ws.send(JSON.stringify({ type: 'dtlsParameters', dtlsParameters }));
+          callback();   // ← unblocks ICE; consume() can now return
+        });
+
+        // connectionstatechange fires AFTER ICE+DTLS complete (async, no blocking).
+        // This is where we wire up video and tell the server to start sending.
+        recvTransport.on('connectionstatechange', state => {
+          dbg(`transport state: ${state}`);
+          setStatus(state);
+          connectStat.textContent = `ICE: ${state}`;
+
+          if (state === 'connected') {
+            iceConnected = true;
+            tryStart();   // starts playback if consume() already finished
+          }
+
+          if (state === 'failed' || state === 'closed') {
+            connected = false;
+            stopStats();
+            if (isTouchDevice) document.getElementById('mobile-controls').style.display = 'none';
+            overlay.style.display = 'flex';
+            connectStat.textContent = 'Connection lost — try again';
+            startBtn.disabled = false;
+          }
+        });
+
+        // Step 2: tell server our codec capabilities so it can create consumers
+        ws.send(JSON.stringify({ type: 'rtpCapabilities', rtpCapabilities: device.rtpCapabilities }));
+        connectStat.textContent = 'Transport ready — requesting streams…';
+
+      // ── consume ───────────────────────────────────────────────────────────
+      // Step 3: server created consumers.  Call recvTransport.consume() for
+      // each track.  The first call triggers the 'connect' event above (which
+      // sends dtlsParameters to server).  consume() then awaits the callback
+      // which is resolved in connectionstatechange:'connected' above.
+      } else if (msg.type === 'consume') {
+        const mediaStream = new MediaStream();
+
+        // Video consumer
+        msVideoConsumer = await recvTransport.consume({
+          id:            msg.videoConsumer.id,
+          producerId:    msg.videoConsumer.producerId,
+          kind:          msg.videoConsumer.kind,
+          rtpParameters: msg.videoConsumer.rtpParameters,
+        });
+        // Pin jitter buffer to minimum so frames are displayed immediately
+        videoReceiver = msVideoConsumer.rtpReceiver;
+        if (videoReceiver) {
+          if (videoReceiver.jitterBufferTarget    !== undefined) videoReceiver.jitterBufferTarget    = 0;
+          if (videoReceiver.playoutDelayHint      !== undefined) videoReceiver.playoutDelayHint      = 0;
+          if (videoReceiver.jitterBufferDelayHint !== undefined) videoReceiver.jitterBufferDelayHint = 0;
+        }
+        mediaStream.addTrack(msVideoConsumer.track);
+        dbg(`video consumer ready — track readyState=${msVideoConsumer.track.readyState}`);
+
+        // Audio consumer (no 'connect' event, transport already negotiating)
+        const msAudioConsumer = await recvTransport.consume({
+          id:            msg.audioConsumer.id,
+          producerId:    msg.audioConsumer.producerId,
+          kind:          msg.audioConsumer.kind,
+          rtpParameters: msg.audioConsumer.rtpParameters,
+        });
+        mediaStream.addTrack(msAudioConsumer.track);
+        dbg(`audio consumer ready — track readyState=${msAudioConsumer.track.readyState}`);
+
+        pendingMediaStream = mediaStream;
+        dbg('consume() done — calling tryStart()');
+        tryStart();   // starts playback if ICE already connected
+
+      // ── probeAck ──────────────────────────────────────────────────────────
+      } else if (msg.type === 'probeAck') {
+        probeRtt = (performance.now() - msg.t).toFixed(1);
+      }
+    };
+
+    ws.onerror = () => {
+      connectStat.textContent = 'Could not reach server';
+      startBtn.disabled = false;
+    };
+  }
+
+  startBtn.onclick = () => {
+    // Prime video playback inside the user gesture so iOS Safari grants autoplay
+    video.play().catch(() => {});
+    connect();
+  };
+
+  // ── Pointer lock ───────────────────────────────────────────────────────────
+  video.addEventListener('click', () => {
+    if (connected) video.requestPointerLock();
+  });
+
+  document.addEventListener('pointerlockchange', () => {
+    pointerLocked = !!document.pointerLockElement;
+    document.getElementById('hint').textContent = pointerLocked
+      ? 'Mouse locked — Esc to release | F11 → fullscreen'
+      : 'Click video → lock mouse | Esc → unlock | F11 → fullscreen';
+  });
+
+  // ── Mouse ──────────────────────────────────────────────────────────────────
+  document.addEventListener('mousemove', (e) => {
+    if (!connected) return;
+    if (pointerLocked) {
+      if (e.movementX !== 0 || e.movementY !== 0) {
+        sendInput({ type: 'mousemove_rel', dx: e.movementX, dy: e.movementY });
+      }
+    } else if (video.matches(':hover')) {
+      const { x, y } = videoToServerCoords(e.clientX, e.clientY);
+      sendInput({ type: 'mousemove_abs', x, y });
+    }
+  });
+
+  video.addEventListener('mousedown', (e) => {
+    if (!connected) return;
+    e.preventDefault();
+    sendInput({ type: 'mousedown', button: e.button });
+  });
+
+  video.addEventListener('mouseup', (e) => {
+    if (!connected) return;
+    sendInput({ type: 'mouseup', button: e.button });
+  });
+
+  video.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  video.addEventListener('wheel', (e) => {
+    if (!connected) return;
+    // Ctrl+scroll = browser zoom — let it pass through untouched
+    if (e.ctrlKey) return;
+    e.preventDefault();
+    sendInput({ type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY });
+  }, { passive: false });
+
+  // ── Keyboard ───────────────────────────────────────────────────────────────
+  // Only capture keys when pointer is locked (avoids fighting browser shortcuts)
+  document.addEventListener('keydown', (e) => {
+    if (!connected || !pointerLocked) return;
+    // Let Escape pass through so browser releases pointer lock
+    if (e.key !== 'Escape') e.preventDefault();
+    sendInput({ type: 'keydown', key: e.key });
+  });
+
+  document.addEventListener('keyup', (e) => {
+    if (!connected || !pointerLocked) return;
+    sendInput({ type: 'keyup', key: e.key });
+  });
+
+  // ── Mobile virtual controller (touch devices only) ────────────────────────
+  const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
+  if (isTouchDevice) {
+    // Controls stay hidden until connected so they don't block the overlay button
+    document.getElementById('hint').style.display = 'none';
+
+    const CAMERA_SENSITIVITY = 1.8;
+    const TAP_MAX_MOVEMENT   = 12;
+
+    // ── Ability bar buttons (registered first — no external deps) ─────────────
+    document.querySelectorAll('.abtn').forEach(btn => {
+      const key      = btn.dataset.key;
+      const mouseBtn = btn.dataset.mouse != null ? Number(btn.dataset.mouse) : null;
+
+      btn.addEventListener('touchstart', e => {
+        e.preventDefault();
+        btn.classList.add('pressed');
+        dbg(`btn key=${key} ch=${inputChannel?.readyState}`);
+        if (mouseBtn != null) sendInput({ type: 'mousedown', button: mouseBtn });
+        else                  sendInput({ type: 'keydown', key });
+      }, { passive: false });
+
+      btn.addEventListener('touchend', e => {
+        e.preventDefault();
+        btn.classList.remove('pressed');
+        if (mouseBtn != null) sendInput({ type: 'mouseup', button: mouseBtn });
+        else                  sendInput({ type: 'keyup', key });
+      }, { passive: false });
+    });
+
+    // ── Camera zone: drag → mouse move only, tap → left click ────────────────
+    const cameraZone = document.getElementById('camera-zone');
+    const camHint    = document.getElementById('cam-hint');
+    let camTouch    = null;
+    let camTotalMove = 0;
+
+    cameraZone.addEventListener('touchstart', e => {
+      e.preventDefault();
+      if (camTouch) return;
+      const t = e.changedTouches[0];
+      camTouch     = { id: t.identifier, x: t.clientX, y: t.clientY };
+      camTotalMove = 0;
+    }, { passive: false });
+
+    cameraZone.addEventListener('touchmove', e => {
+      e.preventDefault();
+      if (!camTouch) return;
+      const t = Array.from(e.changedTouches).find(t => t.identifier === camTouch.id);
+      if (!t) return;
+      const dx = t.clientX - camTouch.x;
+      const dy = t.clientY - camTouch.y;
+      camTotalMove += Math.abs(dx) + Math.abs(dy);
+      sendInput({ type: 'mousemove_rel',
+        dx: Math.round(dx * CAMERA_SENSITIVITY),
+        dy: Math.round(dy * CAMERA_SENSITIVITY),
+      });
+      camTouch.x = t.clientX;
+      camTouch.y = t.clientY;
+    }, { passive: false });
+
+    cameraZone.addEventListener('touchend', e => {
+      e.preventDefault();
+      const t = Array.from(e.changedTouches).find(t => t.identifier === camTouch?.id);
+      if (!t) return;
+      // Tap (little movement) → left click
+      if (camTotalMove <= TAP_MAX_MOVEMENT) {
+        sendInput({ type: 'mousedown', button: 0 });
+        setTimeout(() => sendInput({ type: 'mouseup', button: 0 }), 60);
+      }
+      // Drag → no button event, mouse already moved
+      camTouch = null;
+    }, { passive: false });
+
+    // ── Joystick → WASD (custom, no library — works reliably on iOS) ─────────
+    const activeKeys = new Set();
+    function setKey(key, on) {
+      if (on && !activeKeys.has(key)) { activeKeys.add(key);    sendInput({ type: 'keydown', key }); }
+      else if (!on && activeKeys.has(key)) { activeKeys.delete(key); sendInput({ type: 'keyup',   key }); }
+    }
+
+    // Joystick is created after controls are visible (real dimensions needed)
+    window._initJoystick = () => {
+      const zone    = document.getElementById('joystick-zone');
+      const rect    = zone.getBoundingClientRect();
+      const cx      = rect.left + rect.width  / 2;
+      const cy      = rect.top  + rect.height / 2;
+      const maxDist = rect.width / 2;
+      const DEAD    = 0.3;
+
+      // Draw a simple knob indicator
+      const knob = document.createElement('div');
+      Object.assign(knob.style, {
+        position: 'absolute', width: '44px', height: '44px',
+        borderRadius: '50%', background: 'rgba(255,255,255,0.45)',
+        border: '2px solid rgba(255,255,255,0.7)',
+        left: '50%', top: '50%',
+        transform: 'translate(-50%,-50%)',
+        pointerEvents: 'none', transition: 'transform 0.05s',
+      });
+      zone.appendChild(knob);
+
+      let joyTouch = null;
+
+      zone.addEventListener('touchstart', e => {
+        e.preventDefault();
+        if (joyTouch !== null) return;
+        joyTouch = e.changedTouches[0].identifier;
+      }, { passive: false });
+
+      zone.addEventListener('touchmove', e => {
+        e.preventDefault();
+        const t = Array.from(e.changedTouches).find(t => t.identifier === joyTouch);
+        if (!t) return;
+        const dx  = t.clientX - cx;
+        const dy  = t.clientY - cy;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const clamped = Math.min(len, maxDist);
+        const nx  = dx / len;   // -1..1
+        const ny  = dy / len;   // positive = down on screen
+
+        // Move knob visually
+        const kx = (nx * clamped / maxDist) * 45;
+        const ky = (ny * clamped / maxDist) * 45;
+        knob.style.transform = `translate(calc(-50% + ${kx}px), calc(-50% + ${ky}px))`;
+
+        dbg(`joy nx=${nx.toFixed(2)} ny=${ny.toFixed(2)}`);
+        setKey('w', ny < -DEAD);
+        setKey('s', ny >  DEAD);
+        setKey('a', nx < -DEAD);
+        setKey('d', nx >  DEAD);
+      }, { passive: false });
+
+      zone.addEventListener('touchend', e => {
+        e.preventDefault();
+        if (Array.from(e.changedTouches).some(t => t.identifier === joyTouch)) {
+          joyTouch = null;
+          knob.style.transform = 'translate(-50%, -50%)';
+          ['w','a','s','d'].forEach(k => setKey(k, false));
+        }
+      }, { passive: false });
+
+      dbg('joystick ready');
+    };
+  }
+</script>
+</body>
+</html>
