@@ -218,8 +218,8 @@
       <button class="abtn wide" data-key=" ">Jump</button>
       <button class="abtn" data-key="Tab">Tab</button>
       <button class="abtn" data-key="m">Map</button>
-      <button class="abtn" data-key="i">Bag</button>
-      <button class="abtn" data-key="b">Spells</button>
+      <button class="abtn" data-key="b">Bag</button>
+      <button class="abtn" data-key="p">Spells</button>
       <button class="abtn" data-mouse="2">R🖱</button>
       <button class="abtn" data-key="Escape">Esc</button>
     </div>
@@ -818,20 +818,23 @@
       const key      = btn.dataset.key;
       const mouseBtn = btn.dataset.mouse != null ? Number(btn.dataset.mouse) : null;
 
-      btn.addEventListener('touchstart', e => {
+      function pressButton(e) {
         e.preventDefault();
         btn.classList.add('pressed');
-        dbg(`btn key=${key} ch=${inputChannel?.readyState}`);
         if (mouseBtn != null) sendInput({ type: 'mousedown', button: mouseBtn });
         else                  sendInput({ type: 'keydown', key });
-      }, { passive: false });
+      }
 
-      btn.addEventListener('touchend', e => {
+      function releaseButton(e) {
         e.preventDefault();
         btn.classList.remove('pressed');
         if (mouseBtn != null) sendInput({ type: 'mouseup', button: mouseBtn });
         else                  sendInput({ type: 'keyup', key });
-      }, { passive: false });
+      }
+
+      btn.addEventListener('touchstart', pressButton, { passive: false });
+      btn.addEventListener('touchend', releaseButton, { passive: false });
+      btn.addEventListener('touchcancel', releaseButton, { passive: false });
     });
 
     // ── Camera zone: drag → mouse move only, tap → left click ────────────────
